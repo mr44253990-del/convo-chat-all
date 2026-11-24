@@ -1,0 +1,173 @@
+name: Windows Desktop UI Test (install + auto-login + video)
+
+# Canonical copy of this workflow lives in test/windows-desktop-ui-test.yml
+# (GitHub only executes workflows placed under .github/workflows/).
+#
+# What it does:
+#   1. Downloads the previously built Windows app artifact
+#      (convo-desktop-windows-x64.zip from "Desktop Build (Windows & Linux)").
+#   2. Unpacks + "installs" (runs) convo_chat.exe on a real Windows runner.
+#   3. Records a video of the whole session (ffmpeg gdigrab).
+#   4. Takes screenshots at every step, auto-logs into the demo account
+#      (workflow_dispatch inputs, or repo secrets DEMO_EMAIL / DEMO_PASS)
+#      via SendKeys on the app window.
+#   5. Puts ALL screenshots + the video into ONE folder
+#      (test-results/desktop-ui/) and uploads it as a single artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      demo_email:
+        description: "Demo account email for the auto-login test"
+        required: false
+        default: ""
+      demo_pass:
+        description: "Demo account password for the auto-login test"
+        required: false
+        default: ""
+  workflow_run:
+    workflows: ["Desktop Build (Windows & Linux)"]
+    types: [completed]
+    branches: ["vibe/convo-desktop-port-169417", main]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  windows-ui-test:
+    name: Install, run, auto-login, capture evidence
+    runs-on: windows-latest
+    # Only run the auto test when the desktop build that triggered it succeeded.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify demo credentials are available
+        shell: pwsh
+        env:
+          DEMO_EMAIL: ${{ inputs.demo_email || secrets.DEMO_EMAIL }}
+          DEMO_PASS: ${{ inputs.demo_pass || secrets.DEMO_PASS }}
+        run: |
+          if (-not $env:DEMO_EMAIL -or -not $env:DEMO_PASS) {
+            Write-Error "No demo credentials provided (dispatch inputs or DEMO_EMAIL/DEMO_PASS secrets)."
+            exit 1
+          }
+
+      - name: Ensure ffmpeg is available (video recording)
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
+            choco install ffmpeg -y --no-progress
+          }
+          ffmpeg -version | Select-Object -First 1
+
+      - name: Download the built Windows app artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $run = gh run list -R "$env:GITHUB_REPOSITORY" `
+            --workflow "Desktop Build (Windows & Linux)" `
+            --status success --limit 20 --json databaseId,headBranch -q '.[0].databaseId'
+          if (-not $run) { Write-Error "No successful desktop build run found."; exit 1 }
+          Write-Host "Downloading artifact from run $run"
+          gh run download -R "$env:GITHUB_REPOSITORY" $run `
+            --name convo-desktop-windows-x64 -D download
+          Get-ChildItem -Recurse download | Select-Object FullName
+
+      - name: Install the app (unpack + prep)
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem download -Recurse -Filter *.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath installed
+          $exe = Get-ChildItem installed -Recurse -Filter convo_chat.exe | Select-Object -First 1
+          if (-not $exe) { Write-Error "convo_chat.exe not found in the package."; exit 1 }
+          Write-Host "Installed EXE: $($exe.FullName)"
+          "EXE_PATH=$($exe.FullName)" | Out-File -Encoding utf8 $env:GITHUB_ENV -Append
+
+      - name: Run app + capture video + auto-login + screenshots
+        shell: pwsh
+        env:
+          DEMO_EMAIL: ${{ inputs.demo_email || secrets.DEMO_EMAIL }}
+          DEMO_PASS: ${{ inputs.demo_pass || secrets.DEMO_PASS }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+
+          # One folder for ALL evidence images + the video.
+          $outDir = "test-results/desktop-ui"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          # --- screenshot helper ---------------------------------------------
+          $vs = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          function Snap([string]$name) {
+            $bmp = New-Object System.Drawing.Bitmap($vs.Width, $vs.Height)
+            $g = [System.Drawing.Graphics]::FromImage($bmp)
+            $g.CopyFromScreen($vs.X, $vs.Y, 0, 0, $bmp.Size)
+            $g.Dispose()
+            $bmp.Save("$outDir/$name.png", [System.Drawing.Imaging.ImageFormat]::Png)
+            $bmp.Dispose()
+            Write-Host "Captured $name.png"
+          }
+
+          # --- start video recording ----------------------------------------
+          $rec = Start-Process ffmpeg -ArgumentList @(
+            "-y", "-f", "gdigrab", "-framerate", "10",
+            "-video_size", "$($vs.Width)x$($vs.Height)",
+            "-i", "desktop", "-t", "180",
+            "$outDir/convo-desktop-session.mp4"
+          ) -PassThru -WindowStyle Hidden
+
+          # --- launch the installed app --------------------------------------
+          Start-Process -FilePath $env:EXE_PATH
+          Start-Sleep -Seconds 12          # let Flutter draw the first frame
+          Snap "01-app-launched"
+
+          # --- focus the app window + auto-login ------------------------------
+          $ws = New-Object -ComObject WScript.Shell
+          $focused = $false
+          for ($try = 1; $try -le 10; $try++) {
+            if ($ws.AppActivate("Convo Chat")) { $focused = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $focused) { Write-Host "WARN: could not focus window 'Convo Chat'" }
+          Start-Sleep -Seconds 2
+
+          # Email field
+          [System.Windows.Forms.SendKeys]::SendWait($env:DEMO_EMAIL)
+          Start-Sleep -Milliseconds 600
+          [System.Windows.Forms.SendKeys]::SendWait("{TAB}")
+          Start-Sleep -Milliseconds 400
+          Snap "02-login-email-typed"
+
+          # Password field + submit
+          [System.Windows.Forms.SendKeys]::SendWait($env:DEMO_PASS)
+          Start-Sleep -Milliseconds 600
+          Snap "03-login-password-typed"
+          [System.Windows.Forms.SendKeys]::SendWait("{ENTER}")
+
+          # Wait for the home / chat UI to load after sign-in
+          Start-Sleep -Seconds 15
+          Snap "04-after-login"
+
+          # Second view of the home screen a few seconds apart
+          Start-Sleep -Seconds 8
+          Snap "05-home-second-view"
+
+          # --- stop recording -------------------------------------------------
+          try { Stop-Process -Id $rec.Id -Force -ErrorAction SilentlyContinue } catch {}
+          Start-Sleep -Seconds 3
+
+          Write-Host "=== Evidence folder ==="
+          Get-ChildItem $outDir | Format-Table Name, Length
+
+      - name: Upload all screenshots + video (one folder artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: convo-windows-ui-evidence
+          path: test-results/desktop-ui/
+          if-no-files-found: error
