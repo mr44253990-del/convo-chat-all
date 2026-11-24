@@ -1,0 +1,160 @@
+package com.example.service
+
+import android.app.*
+import android.content.*
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import com.example.call.CallEngine
+import com.example.call.GroupCallEngine
+
+class CallForegroundService : Service() {
+    override fun onCreate() {
+        super.onCreate()
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.createNotificationChannel(NotificationChannel(CHANNEL, "Ongoing Convo Chat calls", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "Keeps microphone and camera active while a call is connected"
+                setSound(null, null); enableVibration(false); setShowBadge(false)
+            })
+        }
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val name = intent?.getStringExtra("remoteName") ?: "Convo Chat user"
+        val video = intent?.getBooleanExtra("video", false) == true
+        val callId = intent?.getStringExtra("callId").orEmpty()
+        val screenShare = intent?.getBooleanExtra("screenShare", false) == true
+        val groupId = intent?.getStringExtra("groupId").orEmpty()
+        val roomId = intent?.getStringExtra("roomId").orEmpty()
+        val groupName = intent?.getStringExtra("groupName").orEmpty()
+        val memberIds = intent?.getStringArrayListExtra("memberIds").orEmpty()
+        val openIntent = Intent(this, com.example.MainActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            if (groupId.isBlank()) setAction("com.ebchat.OPEN_ACTIVE_CALL")
+            if (groupId.isNotBlank() && roomId.isNotBlank()) {
+                setAction("com.ebchat.OPEN_ACTIVE_GROUP_CALL")
+                putExtra("groupId", groupId)
+                putExtra("roomId", roomId)
+                putExtra("groupName", groupName.ifBlank { name })
+                putExtra("memberIds", ArrayList(memberIds))
+                putExtra("videoCall", video)
+            }
+        }
+        val content = PendingIntent.getActivity(this, callId.hashCode(), openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val endIntent = PendingIntent.getBroadcast(
+            this, (callId + "end").hashCode(),
+            Intent(this, CallEndReceiver::class.java).putExtra("callId", callId),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        // Remember when this call started so the status-bar call chip keeps one continuous timer.
+        if (startedCallId != callId) { startedCallId = callId; startedAt = System.currentTimeMillis() }
+        val builder = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(if (video) android.R.drawable.presence_video_online else android.R.drawable.sym_call_outgoing)
+            .setContentTitle(if (groupId.isNotBlank()) name else if (video) "Convo Chat video call" else "Convo Chat audio call")
+            .setContentText(if (groupId.isNotBlank()) "Group call in progress • tap to return" else "On call with $name • tap to return")
+            .setCategory(NotificationCompat.CATEGORY_CALL).setOngoing(true).setSilent(true)
+            .setColor(0xFF19C37D.toInt()).setColorized(true)
+            .setWhen(startedAt).setShowWhen(true).setUsesChronometer(true)
+            .setContentIntent(content)
+        // Android 12+: "ongoing call" style puts a green call bar/chip with a live timer in the
+        // status bar on top of every app, so it is always obvious that a call is running.
+        val styled = runCatching {
+            val person = androidx.core.app.Person.Builder().setName(name).setImportant(true).build()
+            builder.setStyle(NotificationCompat.CallStyle.forOngoingCall(person, endIntent))
+        }.isSuccess
+        if (!styled) builder.addAction(android.R.drawable.sym_call_missed, "End call", endIntent)
+        val notification = builder.build()
+        // A plain notification without the call style, used when Android rejects the styled one.
+        val plain = NotificationCompat.Builder(this, CHANNEL)
+            .setSmallIcon(if (video) android.R.drawable.presence_video_online else android.R.drawable.sym_call_outgoing)
+            .setContentTitle(if (video) "Convo Chat video call" else "Convo Chat audio call")
+            .setContentText("Connected with $name")
+            .setCategory(NotificationCompat.CATEGORY_CALL).setOngoing(true).setSilent(true)
+            .setContentIntent(content)
+            .addAction(android.R.drawable.sym_call_missed, "End call", endIntent)
+            .build()
+        if (Build.VERSION.SDK_INT >= 29) {
+            val mic = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            val phone = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+            val camera = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            val projection = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+            // Android refuses a foreground-service type when its permission is missing or the app
+            // is in the wrong state. Try the ideal combination first, then step down — the service
+            // must ALWAYS reach the foreground, otherwise Android kills the app a few seconds later
+            // (this was one of the "call screen closes by itself" crashes).
+            val attempts = buildList {
+                if (screenShare) {
+                    add(notification to (mic or phone or projection)); add(plain to (mic or phone or projection))
+                    add(plain to (phone or projection)); add(plain to projection)
+                } else if (video) {
+                    add(notification to (mic or phone or camera)); add(plain to (mic or phone or camera))
+                }
+                add(notification to (mic or phone)); add(plain to (mic or phone)); add(plain to phone); add(plain to mic)
+            }
+            var started = false
+            for ((candidate, type) in attempts) {
+                val ok = runCatching { startForeground(NOTIFICATION_ID, candidate, type) }
+                    .onFailure { android.util.Log.w("CALL_FGS", "startForeground type=$type failed: ${it.message}") }.isSuccess
+                if (ok) {
+                    started = true
+                    projectionForegroundAt = if (screenShare && (type and projection) != 0) System.currentTimeMillis() else 0L
+                    break
+                }
+            }
+            if (!started) {
+                projectionForegroundAt = 0L
+                runCatching { startForeground(NOTIFICATION_ID, plain) }.onFailure { android.util.Log.e("CALL_FGS", "No foreground type accepted", it) }
+            }
+        } else {
+            runCatching { startForeground(NOTIFICATION_ID, notification) }.recoverCatching { startForeground(NOTIFICATION_ID, plain) }
+            projectionForegroundAt = if (screenShare) System.currentTimeMillis() else 0L
+        }
+        // Keep the foreground call service eligible for restart if Android recreates
+        // the process while the user is backgrounded or the screen is locked.
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?) = null
+
+    companion object {
+        private const val CHANNEL = "firechat_ongoing_call_v1"
+        private const val NOTIFICATION_ID = 9044
+        /**
+         * Android 14+ only hands out a MediaProjection after a foreground service of type
+         * mediaProjection is running. The engine waits for this timestamp before capturing.
+         */
+        @Volatile var projectionForegroundAt: Long = 0L
+        @Volatile private var startedCallId: String = ""
+        @Volatile private var startedAt: Long = 0L
+        fun start(
+            context: Context,
+            callId: String,
+            remoteName: String,
+            video: Boolean,
+            screenShare: Boolean = false,
+            groupId: String = "",
+            roomId: String = "",
+            groupName: String = "",
+            memberIds: List<String> = emptyList()
+        ) {
+            val intent = Intent(context, CallForegroundService::class.java)
+                .putExtra("callId", callId)
+                .putExtra("remoteName", remoteName)
+                .putExtra("video", video)
+                .putExtra("screenShare", screenShare)
+                .putExtra("groupId", groupId)
+                .putExtra("roomId", roomId)
+                .putExtra("groupName", groupName)
+                .putStringArrayListExtra("memberIds", ArrayList(memberIds))
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent) else context.startService(intent)
+        }
+        fun stop(context: Context) { projectionForegroundAt = 0L; context.stopService(Intent(context, CallForegroundService::class.java)) }
+    }
+}
+
+class CallEndReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent?.getStringExtra("callId").orEmpty().startsWith("group:")) GroupCallEngine.end() else CallEngine.end()
+        CallForegroundService.stop(context)
+    }
+}

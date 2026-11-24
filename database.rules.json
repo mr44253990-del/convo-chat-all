@@ -1,0 +1,187 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "config": {
+      ".read": "auth != null",
+      "app_settings": {
+        ".write": "auth != null && auth.token.email === 'mr4425390@gmail.com'"
+      },
+      "flagship": {
+        ".write": "auth != null && auth.token.email === 'mr4425390@gmail.com'"
+      }
+    },
+    "profileViews": {
+      "$ownerUid": {
+        ".read": "auth != null && auth.uid === $ownerUid",
+        "$viewerUid": {
+          ".write": "auth != null && ((auth.uid === $viewerUid && $viewerUid !== $ownerUid && newData.exists()) || (auth.uid === $ownerUid && !newData.exists()))",
+          ".validate": "!newData.exists() || (newData.hasChildren(['viewerId', 'timestamp']) && newData.child('viewerId').val() === $viewerUid && newData.child('timestamp').isNumber() && newData.child('timestamp').val() <= now + 60000 && (!newData.child('viewerName').exists() || (newData.child('viewerName').isString() && newData.child('viewerName').val().length <= 80)) && (!newData.child('viewerImage').exists() || (newData.child('viewerImage').isString() && newData.child('viewerImage').val().length <= 600)) && (!newData.child('viewerUsername').exists() || (newData.child('viewerUsername').isString() && newData.child('viewerUsername').val().length <= 40)))"
+        }
+      }
+    },
+    "status": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "typing": {
+      "$chatId": {
+        ".read": "auth != null && $chatId.contains(auth.uid)",
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && $chatId.contains(auth.uid)"
+        }
+      }
+    },
+    "voiceRecording": {
+      "$chatId": {
+        ".read": "auth != null && $chatId.contains(auth.uid)",
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && $chatId.contains(auth.uid)"
+        }
+      }
+    },
+    "uploads": {
+      "$chatId": {
+        ".read": "auth != null && $chatId.contains(auth.uid)",
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && $chatId.contains(auth.uid)"
+        }
+      }
+    },
+    "unread_counts": {
+      "$recipientUid": {
+        ".read": "auth != null && auth.uid === $recipientUid",
+        "$senderUid": {
+          ".write": "auth != null && (auth.uid === $recipientUid || auth.uid === $senderUid)",
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        }
+      }
+    },
+    "notifications": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        ".write": "auth != null && (auth.uid === $uid || newData.child('senderId').val() === auth.uid)",
+        ".validate": "newData.hasChildren(['senderId', 'timestamp']) && newData.child('senderId').isString() && newData.child('timestamp').isNumber()"
+      }
+    },
+    "delivery_receipts": {
+      "$recipientUid": {
+        ".read": "auth != null && auth.uid === $recipientUid",
+        "$chatId": {
+          ".write": "auth != null && $chatId.contains(auth.uid)",
+          "$messageId": {
+            ".validate": "newData.hasChild('seen') || newData.hasChild('delivered')"
+          }
+        }
+      }
+    },
+    "online_watch": {
+      "$target": {
+        ".read": "auth != null && auth.uid === $target",
+        ".write": "auth != null && auth.uid === $target",
+        "$watcher": {
+          ".write": "auth != null && auth.uid === $watcher"
+        }
+      }
+    },
+    "chat_settings": {
+      "$chatId": {
+        ".read": "auth != null && $chatId.contains(auth.uid)",
+        ".write": "auth != null && $chatId.contains(auth.uid)",
+        "theme": {
+          ".validate": "newData.isString() && newData.val().length <= 32"
+        },
+        "quickReaction": {
+          ".validate": "newData.isString() && newData.val().length <= 32"
+        }
+      }
+    },
+    "chats": {
+      "$chatId": {
+        ".read": "auth != null && ($chatId.contains(auth.uid) || data.child('members').child(auth.uid).val() === true)",
+        ".write": "auth != null && ($chatId.contains(auth.uid) || data.child('members').child(auth.uid).val() === true || newData.child('members').child(auth.uid).val() === true)",
+        "members": {
+          "$uid": {
+            ".validate": "$uid === auth.uid || $chatId.contains($uid)"
+          }
+        },
+        "messages": {
+          ".read": "auth != null && ($chatId.contains(auth.uid) || data.parent().child('members').child(auth.uid).val() === true)",
+          ".write": "auth != null && ($chatId.contains(auth.uid) || data.parent().child('members').child(auth.uid).val() === true)",
+          ".indexOn": [
+            "timestamp"
+          ],
+          "$messageId": {
+            ".validate": "newData.hasChildren(['messageId', 'senderId', 'timestamp']) && newData.child('messageId').val() === $messageId && newData.child('senderId').isString() && newData.child('timestamp').isNumber()"
+          }
+        }
+      }
+    },
+    "calls": {
+      "$callId": {
+        ".read": "auth != null && (data.child('callerId').val() === auth.uid || data.child('calleeId').val() === auth.uid)",
+        ".write": "auth != null && ((!data.exists() && newData.child('callerId').val() === auth.uid) || data.child('callerId').val() === auth.uid || data.child('calleeId').val() === auth.uid)",
+        ".indexOn": [
+          "status",
+          "createdAt",
+          "expiresAt"
+        ]
+      }
+    },
+    "groupCalls": {
+      "$roomId": {
+        ".read": "auth != null && (data.child('memberIds').child(auth.uid).val() === true || data.child('hostId').val() === auth.uid)",
+        ".write": "auth != null && ((!data.exists() && newData.child('memberIds').child(auth.uid).val() === true && newData.child('hostId').val() === auth.uid) || data.child('hostId').val() === auth.uid)",
+        ".indexOn": [
+          "status",
+          "createdAt",
+          "expiresAt"
+        ],
+        "status": {
+          ".write": "auth != null && (data.parent().child('memberIds').child(auth.uid).val() === true || data.parent().child('hostId').val() === auth.uid)",
+          ".validate": "newData.isString()"
+        },
+        "lastActiveAt": {
+          ".write": "auth != null && (data.parent().child('memberIds').child(auth.uid).val() === true || data.parent().child('hostId').val() === auth.uid)",
+          ".validate": "newData.isNumber() || newData.val() === null"
+        },
+        "participants": {
+          "$uid": {
+            ".write": "$uid === auth.uid || data.parent().parent().child('hostId').val() === auth.uid",
+            ".validate": "newData.hasChildren(['uid', 'name', 'video', 'muted']) && ($uid === auth.uid || data.parent().parent().child('hostId').val() === auth.uid)",
+            "hostMuted": {
+              ".validate": "newData.isBoolean()"
+            },
+            "removed": {
+              ".validate": "newData.isBoolean()"
+            }
+          }
+        },
+        "meetingState": {
+          "captionsEnabled": {
+            ".write": "auth != null && data.parent().parent().child('hostId').val() === auth.uid",
+            ".validate": "newData.isBoolean()"
+          },
+          "recording": {
+            ".write": "auth != null && data.parent().parent().child('hostId').val() === auth.uid",
+            ".validate": "newData.isBoolean()"
+          }
+        },
+        "signals": {
+          "$targetUid": {
+            ".write": "auth != null && (data.parent().parent().parent().child('memberIds').child(auth.uid).val() === true || data.parent().parent().parent().child('hostId').val() === auth.uid)",
+            ".validate": "$targetUid === auth.uid || data.parent().parent().parent().child('memberIds').child(auth.uid).val() === true"
+          }
+        },
+        "memberIds": {
+          "$uid": {
+            ".write": "auth != null && (data.parent().parent().child('memberIds').child(auth.uid).val() === true || data.parent().parent().child('hostId').val() === auth.uid)",
+            ".validate": "newData.isBoolean()"
+          }
+        }
+      }
+    }
+  }
+}

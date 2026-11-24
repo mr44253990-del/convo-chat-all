@@ -1,2 +1,233 @@
-# convo-chat-all
-Convo Chat All
+> **v5.7 note:** the browser (web) version has been removed. The `web-companion/` folder and its deploy script are no longer in the repository and the app no longer links to it. Sections below that mention the web app describe earlier releases.
+
+# Convo Chat (ফায়ারচ্যাট) Setup & Configuration Guide
+
+## Premium Aurora UI
+
+The app now uses a unified **Glassmorphism + Material 3** design system across onboarding, authentication, feed, stories, direct chat, group chat, admin, profile, dialogs, cards, and navigation.
+
+- Aurora gradient canvas with translucent glass surfaces and soft ambient depth
+- Large 24–32dp corners, pill controls, refined type hierarchy, and accessible touch targets
+- Material You wallpaper colors on Android 12+ through the **Dynamic** appearance mode
+- Explicit **Light**, **Dark**, and true **AMOLED** appearance modes plus themed palettes
+- Edge-to-edge layouts, animated state transitions, premium loading/disabled states, and consistent component styling
+
+Choose an appearance from **Profile & appearance → Choose Application Theme**.
+
+### Social system configuration
+
+1. Enable **Google** in Firebase Authentication → Sign-in providers and add the app's SHA-1/SHA-256 fingerprints.
+2. Replace/publish the included `firestore.rules` before testing activity notifications, friend requests, message requests, profiles, posts, stories, or groups.
+3. Notifications use Firestore as a short-lived delivery queue. The Android client writes each received item to Room and then deletes the remote notification document, keeping history locally without growing Firestore indefinitely.
+4. Friend and message request queries use a single `receiverId` equality filter, so no composite Firestore index is required.
+5. Google provides display name, email, and profile image. Birthday is not included in the standard Google ID token; users can complete it safely from **Profile & appearance**.
+6. Redeploy `cloudflare-worker.js` after this update. The authenticated sender reads the recipient's `users/{uid}.fcmToken` routing field and includes that token with activity type, target ID, sender name, and public profile image URL. Worker `3.2.0` performs no Firestore lookup; it validates the caller's Firebase ID token and sends directly through FCM v1.
+
+### Direct FCM v1 gateway — no n8n
+
+Convo Chat no longer requires an n8n webhook. The Android client calls the included Cloudflare Worker directly. The Worker exchanges its encrypted service-account credential for an OAuth token and calls FCM v1.
+
+1. Revoke every service-account key ever pasted into chat, source code, an APK, or a public repository.
+2. Generate a fresh Firebase service-account JSON key.
+3. In Cloudflare Worker → Settings → Variables, create an **encrypted secret** named `FIREBASE_SERVICE_ACCOUNT` and paste the fresh JSON there. Never place it in Android resources, BuildConfig, `.env`, `google-services.json`, or Git.
+4. Deploy the current `cloudflare-worker.js`. It sends data-only high-priority messages so Android applies separate Message, Request, and Activity channels with custom vibration and profile imagery.
+5. Convo Chat defaults to `https://convo-chat-companion.mr4425390.workers.dev/`. The Admin Service panel can run `/health`, save a replacement URL, and send a self-test notification.
+
+A safe deployment helper is included:
+
+```bash
+export CLOUDFLARE_ACCOUNT_ID='your-account-id'
+export CLOUDFLARE_API_TOKEN='a Workers Scripts:Edit token'
+export FIREBASE_SERVICE_ACCOUNT_FILE='/absolute/path/to/a-fresh-service-account.json'
+./deploy-firechat-worker.sh
+```
+
+The new `firechat-fcm-worker.js` supports public health diagnostics and authenticated POST delivery. Use `./test-firechat-worker.sh` for cURL-based health/authenticated tests. Never put either credential in these scripts.
+
+### Web-first profile
+
+The companion Worker (`https://convo-chat-companion.mr4425390.workers.dev`) also serves the web app at `web-companion/site/`, and every profile now opens on the web first:
+
+- **Worker public profile page** (`/profile?uid=<uid>`): cover art, floating avatar with an inline camera pick, badges (moderator / premium / profile type), bio, professional title, pronouns, friend/follower/following counters, and a gradient link card. The primary action is **Open in Convo Web**; the Android app deep link is the secondary fallback.
+- **Android profile** (`Settings → Profile details`): a "Your web profile" card that opens the browser version or copies the shareable link in one tap, plus an "Open web profile" entry in the profile menu.
+- **Web profile** (`web-companion/site/`): edit profile (name, bio, title, pronouns), photo change (browser square center-crop → R2 upload → shared `profileImageUrl` across phone, web, and public page), copyable public link (`/profile/link`) with native share, grouped notification and privacy rows, and session management (`/web-pair/sessions` → revoke one or all browser sessions).
+
+New Worker routes: `POST /web-pair/profile/avatar`, `POST /web-pair/profile/link`, and an extended `POST /web-pair/profile/save` (accepts `professionalTitle`, `pronouns`, `profileImageUrl`). `webPairMe` returns cover image, title, pronouns, profile type, role, `createdAt`, and counters.
+
+The Google button first uses `GetSignInWithGoogleOption` and falls back to `GetGoogleIdOption` for OEM Credential Manager compatibility. The repository now uses one stable debug keystore so CI fingerprints no longer change on every build. Add these fingerprints to Firebase Android app `com.ebchat`, enable Authentication → Google, then download a fresh `google-services.json` (it must contain an Android OAuth `client_type: 1` entry):
+
+```text
+Debug SHA-1:   92:1B:62:30:48:C5:93:25:09:A5:F7:F9:05:95:83:90:9A:92:AF:F0
+Debug SHA-256: 73:4D:2E:06:28:37:1E:DB:E5:D5:AD:1C:86:6D:CE:99:72:6E:E7:BC:D4:9B:0B:E4:4E:4B:DF:B6:F1:54:43:4F
+```
+
+Release SHA values must also be added from the real release keystore. The currently checked-in `google-services.json` has only Web OAuth `client_type: 3`, so Firebase Console configuration and a fresh download are mandatory.
+
+### Text-only posts
+
+Feed posts are text-only and use a dedicated composer route. Users can choose predefined animated gradient backgrounds, feelings, hashtags, people tags, privacy, and clickable HTTPS links. The ViewModel forcibly clears image/audio/video fields even if an old client attempts to submit them. Story and chat media remain supported. Expired 12-hour stories delete both Firestore metadata and their Supabase image/video objects.
+
+### 1:1 WebRTC audio calls
+
+Audio calls use RTDB for offer/answer/ICE signaling and Cloudflare Realtime TURN only when direct P2P connectivity fails. Worker `4.0.0` exposes an authenticated `/turn-credentials` endpoint and generates one-hour short-lived credentials; long-lived TURN secrets never enter the APK.
+
+Create fresh Cloudflare secrets (rotate every value ever pasted into chat):
+
+```text
+TURN_TOKEN_ID=<fresh TURN key ID>
+TURN_API_TOKEN=<fresh TURN API token>
+CALLS_APP_ID=<fresh Cloudflare Realtime SFU app ID>
+CALLS_APP_TOKEN=<fresh Cloudflare Realtime SFU API token>
+```
+
+Worker `4.1.0` exposes authenticated SFU proxy routes for session creation, local/remote tracks, renegotiation, and track closing. The health endpoint reports `sfuConfigured`; no long-lived Calls/TURN token is embedded in Android. Incoming-call sound uses an explicit ringtone controller and the silent `convo_calls_v4` notification channel to avoid duplicate system sound and stop ringing on Accept/Decline.
+
+Deploy with:
+
+```bash
+export TURN_TOKEN_ID='fresh-id'
+export TURN_API_TOKEN='fresh-token'
+./deploy-firechat-worker.sh
+firebase deploy --only database,firestore:rules
+```
+
+Profile & appearance now checks app notification access, the incoming-call channel importance, and Android 14+ **Allow full-screen incoming calls** access. The FCM service always attaches the explicit full-screen target; Android enforces its special access and may fall back to a CallStyle heads-up notification when the user or OS disallows full-screen launch. Calls cannot be forced past Android notification, Doze, battery, or manufacturer restrictions. Incoming calls ring with the device ringtone, expire after 30 seconds, support accept/decline, mute, speaker, reconnect state, and retain a lightweight call item in local chat history.
+
+Presence monitoring uses only the separate Cloudflare `firechat-presence-worker.js` and its five-minute Cron Trigger. The Worker sends silent, normal-priority, data-only FCM probes to distinct device tokens stored in Firestore; FCM send acceptance is not proof of receipt, so only an app acknowledgement counts as reachability. The Admin dashboard lists Firestore profiles with Online, Reachable, or Offline status, last signal, last probe acknowledgement, and FCM registration state. Android/FCM delivery is best-effort and may be delayed or suppressed by Doze, battery/network restrictions, permissions, or OEM behavior. Saving a Worker URL does not configure its Cron Trigger; keep exactly one presence schedule active. See [docs/presence-worker.md](docs/presence-worker.md) and the [Bengali Cloudflare guide](docs/presence-worker-bn.md).
+
+When an incoming-call FCM reaches the callee, the device changes RTDB status from `calling` to `ringing`; the caller then hears ringback. Connecting vibrates briefly, audio calls use the proximity sensor to turn the screen off near the ear, and notification messages support inline replies. Only an active call starts a temporary phone-call foreground service and CPU wake lock, keeping microphone/camera alive with the screen off; it stops immediately when the call ends.
+
+### Unified app storage (Supabase + Cloudflare Worker)
+
+Admin Settings → **Unified app storage** can route every new upload through Supabase: chat attachments, voice messages, avatars, stories, posts, reels, thumbnails, and signed APK updates. The admin can set the Project URL and each public bucket ID, save the settings to Firestore `app_config/storage`, and run **Save + test**. The dedicated `firechat-storage-worker.js` reads those non-secret settings live, so changing the URL/provider/bucket IDs does not require editing or redeploying Worker source.
+
+Deploy and configure the new Worker once with [`docs/storage-worker.md`](docs/storage-worker.md) and `wrangler-storage.toml`. Keep `FIREBASE_SERVICE_ACCOUNT` and `SUPABASE_SERVICE_ROLE_KEY` only in Cloudflare Worker secrets. The Worker verifies Firebase ID tokens, keeps the Supabase service-role key server-side, limits upload size, restricts APK upload/delete to the admin, checks ownership on deletes, creates missing buckets when enabled, and reports exact bucket/write/delete diagnostics. Standard buckets start as `avatars`, `chat_images`, `voice_notes`, `posts`, `reels`, `thumbnails`, and `updates`; folders are virtual and appear on first upload. Public visibility is required because media URLs are served to other app users.
+
+Deploy the branch's `firestore.rules` so the **non-secret** `app_config/storage` document can be read before account creation (needed for signup profile-photo routing); all other app config remains signed-in only, and only the admin can write it. Turning the Supabase switch off restores the existing mixed R2/direct-Supabase route. Post/reel/thumbnail metadata keeps the existing ten-day expiry behavior; APK files do not expire.
+
+### App lock and notification privacy
+
+Profile settings can enable a 4–8 digit PBKDF2 PIN and optional Android biometric/device credential. When lock is enabled, notifications hide sender/message content. Long-pressing a conversation toggles mute. The lock closes on app background and reopens through PIN or biometric prompt.
+
+### Release signing
+
+GitHub Actions now restores a protected upload keystore from repository secrets and builds `assembleDebug`, signed `assembleRelease`, and `bundleRelease`. Release SHA fingerprints are stored separately in the private release-signing deliverable; add them to Firebase before using Google login in release builds.
+
+Onboarding pages support left/right swipes, animated transitions, pulsing illustrations, and button navigation. Call windows use `FLAG_SECURE`, preventing standard screenshots and screen recording during audio/video calls.
+
+### Ephemeral chat delivery
+
+Direct messages use RTDB as a delivery envelope and Room as device-owned history. The sender stores a local copy immediately. When the receiver opens the conversation, Convo Chat stores the incoming text/image/voice metadata locally, writes a lightweight seen receipt for the sender, and removes the delivered message envelope from RTDB. Receipt documents are removed after the sender caches the seen state. A non-destructive Room `2 → 3` migration preserves existing local conversations during app updates.
+
+Remote Supabase media files are intentionally not deleted during acknowledgement. Removing a media object before a verified local file download would break cached image and voice messages. A future server-side retention job may remove media only after both devices submit durable-download acknowledgements.
+
+স্বাগতম! **Convo Chat** হলো একটি রিয়েল-টাইম চ্যাটিং অ্যান্ড্রয়েড অ্যাপ্লিকেশন যা Jetpack Compose, Kotlin এবং Firebase (Authentication, Firestore, Realtime Database) ব্যবহার করে তৈরি করা হয়েছে। ব্যাকগ্রাউন্ডে এবং অ্যাপ বন্ধ থাকা অবস্থায়ও নোটিফিকেশন পাঠাতে এটি **Cloudflare Workers** এবং **Firebase Cloud Messaging (FCM) v1 API** এর সফল সংযোগ ব্যবহার করে।
+
+এই নির্দেশিকায় সম্পূর্ণ সেটআপ প্রসেস (ফায়ারবেস কনফিগারেশন থেকে শুরু করে ক্লাউডফ্লেয়ার ওয়ার্কার ডিপ্লয়মেন্ট) বিস্তারিত আলোচনা করা হলো।
+
+---
+
+## ১. ফায়ারবেস কনসোল কনফিগারেশন (Firebase Console Setup)
+
+প্রথমে আপনার অ্যাপ্লিকেশনের জন্য একটি ফায়ারবেস প্রজেক্ট তৈরি করতে হবে:
+
+১. **ফায়ারবেস কনসোলে যান**: [Firebase Console](https://console.firebase.google.com/)-এ গিয়ে একটি নতুন প্রজেক্ট তৈরি করুন।
+২. **অ্যান্ড্রয়েড অ্যাপ যুক্ত করুন**: প্রজেক্টে অ্যান্ড্রয়েড আইকন সিলেক্ট করে নতুন অ্যাপ যুক্ত করুন।
+   - **Package Name (Application ID)**: আপনার অ্যাপের প্যাকেজ নেম ব্যবহার করুন। এই অ্যাপে প্যাকেজ নেমটি কনফিগার করা আছে:
+     `com.aistudio.firechat.nzvjqp`
+৩. **`google-services.json` ডাউনলোড করুন**: কনফিগারেশন শেষে `google-services.json` ফাইলটি ডাউনলোড করে আপনার অ্যান্ড্রোয়েড প্রজেক্টের এই ফোল্ডারে পেস্ট করুন:
+   `[Project Root]/app/google-services.json`
+
+---
+
+## ২. ফায়ারবেস সার্ভিসসমূহ সেটআপ এবং সিকিউরিটি রুলস (Firebase Services & Rules)
+
+### ক. Firebase Authentication
+- ফায়ারবেস ড্যাশবোর্ডে **Build > Authentication**-এ যান।
+- **Get Started**-এ ক্লিক করে **Sign-in method** ট্যাব থেকে **Email/Password** প্রোভাইডারটি **Enable** করুন।
+
+### খ. Cloud Firestore Database (ইউজার প্রোফাইল সংরক্ষণের জন্য)
+- **Build > Firestore Database**-এ গিয়ে **Create Database** ক্লিক করুন।
+- **Start in test mode** বা Production সিলেক্ট করে ডাটাবেজ তৈরি করুন।
+- **Rules** ট্যাবে গিয়ে নিচের রুলসটি আপডেট করুন এবং **Publish** করুন:
+
+```javascript
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      // যেকোনো অথেনটিকেটেড ইউজার ডাটা পড়তে এবং লিখতে পারবে
+      allow read, write: if request.auth != null;
+    }
+  }
+}
+```
+
+### গ. Firebase Realtime Database (রিয়েল-টাইম চ্যাটের জন্য)
+- **Build > Realtime Database**-এ গিয়ে **Create Database** ক্লিক করুন।
+- ডাটাবেজের লোকোশন সিলেক্ট করে তৈরি করুন।
+- **Rules** ট্যাবে গিয়ে নিচের রুলসটি পরিবর্তন করুন এবং **Publish** করুন:
+
+```json
+{
+  "rules": {
+    ".read": "auth != null",
+    ".write": "auth != null",
+    "chats": {
+      "$chatId": {
+        "messages": {
+          ".indexOn": ["timestamp"]
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## ৩. ক্লাউডফ্লেয়ার ওয়ার্কার সেটআপ (Cloudflare Workers Setup)
+
+চ্যাট মেসেজ পাঠানোর সাথে সাথে ব্যাকগ্রাউন্ড নোটিফিকেশন পাঠাতে ক্লাউডফ্লেয়ার ওয়ার্কার তৈরি করা প্রয়োজন। এটি Firebase FCM v1 API কল করবে।
+
+### ক. Firebase Service Account Private Key তৈরি
+১. ফায়ারবেস কনসোলে প্রজেক্টের পাশে থাকা গিয়ার আইকনে ক্লিক করে **Project Settings**-এ যান।
+২. **Service accounts** ট্যাবে ক্লিক করুন।
+৩. নিচে থাকা **Generate new private key** বাটনে ক্লিক করুন।
+৪. একটি `.json` কী ফাইল ডাউনলোড হবে। ফাইলটি অত্যন্ত সুরক্ষিত রাখুন। এই ফাইলের ভেতরের সম্পূর্ণ কোডটি আমাদের ক্লাউডফ্লেয়ারের সিক্রেটস-এ ব্যবহার করতে হবে।
+
+### খ. ক্লাউডফ্লেয়ার ওয়ার্কার তৈরি ও কোড ডিপ্লয়মেন্ট
+১. আপনার [Cloudflare Dashboard](https://dash.cloudflare.com/)-এ লগইন করুন।
+২. বামদিকের মেনু থেকে **Workers & Pages**-এ গিয়ে **Create Application** এবং তারপর **Create Worker** বাটনে ক্লিক করুন।
+৩. ওয়ার্কারটির নাম দিন (যেমন: `firechat-notif-worker`) এবং **Deploy**-এ ক্লিক করুন।
+৪. ডেপ্লয় হওয়ার পর **Edit code** বাটনে ক্লিক করুন।
+৫. অ্যান্ড্রোয়েড প্রজেক্টের রুটে থাকা `cloudflare-worker.js` ফাইলের সমস্ত কোড কপি করে ওয়ার্কারের এডিটর বক্সে পেস্ট করুন।
+৬. ডানদিকের উপরে থাকা **Save and Deploy** বাটনে ক্লিক করুন।
+
+### গ. ওয়ার্কার এনভায়রনমেন্ট ভেরিয়েবল (Secret Environment Variable) কনফিগারেশন
+১. আপনার ক্লাউডফ্লেয়ার ওয়ার্কার ড্যাশবোর্ডে ফিরে যান (যেমন: `firechat-notif-worker` এর সেটিংস পেজে)।
+২. **Settings** ট্যাব থেকে **Variables** অপশনে যান।
+৩. **Environment Variables** সেকশনে গিয়ে **Add Secret** বাটনে ক্লিক করুন।
+৪. সিক্রেটের বিস্তারিত:
+   - **Variable Name (Key)**: `FIREBASE_SERVICE_ACCOUNT`
+   - **Value**: ফায়ারবেস থেকে ডাউনলোড করা সার্ভিস অ্যাকাউন্ট `.json` ফাইলের ভেতরে থাকা **সম্পূর্ণ কন্টেন্ট/লেখা কপি করে** হুবহু এখানে পেস্ট করুন।
+৫. **Encrypt and Save** বাটনে ক্লিক করুন।
+
+---
+
+## ৪. অ্যাপ্লিকেশনে ওয়ার্কার ইন্টিগ্রেশন ও টেস্টিং (App Integration & Testing)
+
+১. সম্পূর্ণ অ্যান্ড্রয়েড প্রজেক্টটি কম্পাইল এবং রান করুন।
+২. অ্যাপে প্রবেশ করলে প্রথমে **Notification Permission** চাওয়া হবে, এটি মঞ্জুর (Allow) করুন।
+৩. **Sign Up** ট্যাবে গিয়ে আপনার ইমেইল, নাম এবং জন্ম তারিখ দিয়ে অ্যাকাউন্ট তৈরি করুন।
+   - সাইনআপ সফল হওয়ার সাথে সাথে আপনার জন্য একটি ইউনিক ইউজারনেম জেনারেট হবে (যেমন: `shuvo_2391`) এবং আপনার ডিভাইসের একটি ইউনিক **FCM Token** ফায়ারস্টোরে সেভ হবে।
+৪. আপনার প্রোফাইল সেটিংস চেক করতে হোম স্ক্রিনের ডান কোণায় থাকা **Settings (গিয়ার আইকন)**-এ ক্লিক করুন।
+৫. সেখানে আপনার নিজের FCM টোকেন দেখতে পাবেন।
+৬. সেখানে **Cloudflare Worker URL** টেক্সট ফিল্ডে আপনার ডেপ্লয় করা ক্লাউডফ্লেয়ার ওয়ার্কারের পাবলিক URL-টি পেস্ট করুন (যেমন: `https://firechat-notif-worker.yourdomain.workers.dev`)। এটি রিয়েল-টাইমে সেভ হয়ে থাকবে।
+৭. এখন অন্য ডিভাইসে আরেকটি অ্যাকাউন্ট তৈরি করুন। হোম স্ক্রিনে সার্চ বারে ইউজারনেম সার্চ দিয়ে তার চ্যাটরুমে প্রবেশ করুন।
+৮. তাকে মেসেজ পাঠালে মেসেজটি সাথে সাথে ফায়ারবেস রিয়েল-টাইম ডাটাবেজে যুক্ত হবে এবং ব্যাকগ্রাউন্ড নোটিফিকেশন পাঠানোর জন্য ক্লাউডফ্লেয়ার ওয়ার্কারকে কল করবে। 
+৯. রিসিভার ডিভাইসটি যদি ব্যাকগ্রাউন্ডে থাকে বা ইন্টারনেট সংযোগ সহ লক থাকে, তবুও তার কাছে সাথে সাথে পুশ নোটিফিকেশন পৌঁছে যাবে এবং সে নোটিফিকেশনে ক্লিক করে সরাসরি আপনার চ্যাটরুমে প্রবেশ করতে পারবে!
+
+---
+
+যেকোনো সমস্যা বা বাড়তি ফিচারের সহায়তায় অ্যান্ড্রয়েড বিল্ড বা ক্লাউডফ্লেয়ার লগ চেক করুন। শুভ চ্যাটিং!

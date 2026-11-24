@@ -1,0 +1,1165 @@
+package com.example.ui
+
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import android.media.MediaPlayer
+import android.media.MediaRecorder
+import android.net.Uri
+import android.os.Build
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.*
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.*
+import androidx.compose.ui.input.pointer.pointerInput
+import com.example.ui.theme.glassmorphic
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.graphicsLayer
+import kotlinx.coroutines.launch
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import coil.compose.AsyncImage
+import com.example.data.Group
+import com.example.data.GroupMessage
+import com.google.firebase.auth.FirebaseAuth
+import java.io.File
+import java.io.InputStream
+import java.text.SimpleDateFormat
+import java.util.*
+import kotlin.math.abs
+import kotlin.math.roundToInt
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun GroupChatScreen(
+    viewModel: ChatViewModel,
+    group: Group,
+    onBack: () -> Unit,
+    onGroupCall: (video: Boolean) -> Unit = {},
+    pendingCallRoomId: String? = null,
+    pendingCallVideo: Boolean = false,
+    onJoinPendingCall: (String, Boolean) -> Unit = { _, _ -> },
+    onDismissPendingCall: () -> Unit = {},
+    onOpenUserProfile: (com.example.data.User) -> Unit = {}
+) {
+    val context = LocalContext.current
+    com.example.service.TrackOpenChat(peerUid = null, groupId = group.id)
+    val currentUserId = FirebaseAuth.getInstance().currentUser?.uid ?: ""
+    val messages by viewModel.groupMessagesState.collectAsState()
+    val allUsers by viewModel.usersState.collectAsState()
+    val groupVoiceRecorders by viewModel.groupVoiceRecorders.collectAsState()
+    val otherVoiceRecorders = remember(groupVoiceRecorders, currentUserId) { groupVoiceRecorders.filter { it != currentUserId } }
+    var showAddMembers by remember { mutableStateOf(false) }
+    var showMembers by remember { mutableStateOf(false) }
+    var showGroupMenu by remember { mutableStateOf(false) }
+    var showSmartTools by remember { mutableStateOf(false) }
+    // Live call in this group (anyone started it): every member sees the Join bar.
+    val liveGroupCall by viewModel.activeGroupCall.collectAsState()
+    val myGroupCall by com.example.call.GroupCallEngine.state.collectAsState()
+    val insideThisCall = myGroupCall.groupId == group.id && myGroupCall.status !in listOf("idle", "ended", "failed")
+    val joinRoomId = liveGroupCall?.roomId ?: pendingCallRoomId
+    val joinVideo = liveGroupCall?.video ?: pendingCallVideo
+    var showMessageSearch by remember { mutableStateOf(false) }
+    var messageSearchQuery by remember { mutableStateOf("") }
+    val visibleGroupMessages = remember(messages, messageSearchQuery) {
+        val query = messageSearchQuery.trim().lowercase()
+        if (query.isBlank()) messages else messages.filter {
+            it.text.lowercase().contains(query) || it.senderName.lowercase().contains(query)
+        }
+    }
+
+    var messageText by remember { mutableStateOf("") }
+    var replyingToGroupMessage by remember { mutableStateOf<GroupMessage?>(null) }
+    var translationMessage by remember { mutableStateOf<GroupMessage?>(null) }
+    var translationText by remember { mutableStateOf("") }
+    var translationLoading by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
+
+    if (translationMessage != null) {
+        AlertDialog(
+            onDismissRequest = { if (!translationLoading) translationMessage = null },
+            title = { Text(tr("AI translation"), fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(translationMessage?.text.orEmpty(), color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                    if (translationLoading) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+                            Text(tr("Translating to Bengali…"))
+                        }
+                    } else Text(translationText.ifBlank { "No translation returned." })
+                }
+            },
+            confirmButton = { TextButton(enabled = !translationLoading, onClick = { translationMessage = null }) { Text(tr("Close")) } }
+        )
+    }
+
+    // Select the active group when entering this screen and clean up when leaving
+    LaunchedEffect(group.id) {
+        viewModel.selectGroup(group)
+    }
+
+    DisposableEffect(group.id) {
+        onDispose {
+            viewModel.selectGroup(null)
+        }
+    }
+
+    // Voice recording states
+    var isRecording by remember { mutableStateOf(false) }
+    var mediaRecorder by remember { mutableStateOf<MediaRecorder?>(null) }
+    var voiceFile by remember { mutableStateOf<File?>(null) }
+    var recordStartTime by remember { mutableStateOf(0L) }
+    var voiceCancelArmed by remember { mutableStateOf(false) }
+    val groupUiScope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { ChatPreferences.load(context) }
+    val quickReaction by ChatPreferences.quickReaction.collectAsState()
+    val chatTextScale by ChatPreferences.textScale.collectAsState()
+    val chatAppearance by ChatPreferences.appearance.collectAsState()
+    // New messages animate in once; history and scroll-back stay still.
+    val chatOpenedAt = remember { System.currentTimeMillis() }
+    val enteredMessageIds = remember { HashSet<String>() }
+    val defaultChatTheme by ChatPreferences.defaultChatTheme.collectAsState()
+    val groupThemeSpec = remember(defaultChatTheme) { ChatThemeCatalog.find(defaultChatTheme)?.takeIf { !it.adaptive } }
+    val groupMemberUsers = remember(allUsers, group.members) { allUsers.filter { it.uid in group.members } }
+    val openMention: (String) -> Unit = { handle ->
+        val target = Mentions.findUser(handle, allUsers)
+        if (target != null) onOpenUserProfile(target)
+        else Toast.makeText(context, "@$handle was not found", Toast.LENGTH_SHORT).show()
+    }
+
+    var audioPermissionGranted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        audioPermissionGranted = isGranted
+        if (!isGranted) {
+            Toast.makeText(context, "Microphone access is needed for voice messages.", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Scroll to bottom on new message instantly
+    LaunchedEffect(messages.size) {
+        if (messages.isNotEmpty()) {
+            listState.scrollToItem(0)
+        }
+    }
+
+    // Photo Gallery picker
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            Toast.makeText(context, "Uploading photo...", Toast.LENGTH_SHORT).show()
+            try {
+                val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
+                val bytes = inputStream?.readBytes()
+                if (bytes != null) {
+                    val fileName = "group_img_${System.currentTimeMillis()}.jpg"
+                    viewModel.uploadFileToSupabase(
+                        bucket = "chat_images",
+                        fileName = fileName,
+                        fileBytes = bytes,
+                        contentType = "image/jpeg",
+                        onSuccess = { publicUrl ->
+                            viewModel.sendGroupMessage(
+                                groupId = group.id,
+                                text = "",
+                                imageUrl = publicUrl
+                            )
+                            Toast.makeText(context, "Photo sent to group!", Toast.LENGTH_SHORT).show()
+                        },
+                        onFailure = { err ->
+                            Toast.makeText(context, "Photo upload failed: $err", Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                Toast.makeText(context, "Error loading file: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Voice recording helpers
+    val startRecording = {
+        if (!isRecording) {
+            if (!audioPermissionGranted) {
+                permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            } else {
+                try {
+                    val tempFile = File.createTempFile("group_voice_temp", ".m4a", context.cacheDir)
+                    voiceFile = tempFile
+                    val recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        MediaRecorder(context)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        MediaRecorder()
+                    }
+                    recorder.apply {
+                        setAudioSource(MediaRecorder.AudioSource.MIC)
+                        setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        setOutputFile(tempFile.absolutePath)
+                        prepare()
+                        start()
+                    }
+                    mediaRecorder = recorder
+                    isRecording = true
+                    viewModel.setGroupVoiceRecordingState(group.id, true)
+                    recordStartTime = System.currentTimeMillis()
+                } catch (e: Exception) {
+                    runCatching { mediaRecorder?.release() }
+                    mediaRecorder = null
+                    isRecording = false
+                    viewModel.setGroupVoiceRecordingState(group.id, false)
+                    voiceFile?.delete()
+                    voiceFile = null
+                    Log.e("GROUP_VOICE_REC", "Failed to start recording", e)
+                    Toast.makeText(context, "Could not start voice recording", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val stopAndSendVoice = {
+        if (isRecording) {
+            val recorder = mediaRecorder
+            val file = voiceFile
+            mediaRecorder = null
+            voiceFile = null
+            isRecording = false
+            viewModel.setGroupVoiceRecordingState(group.id, false)
+            try {
+                recorder?.stop()
+                recorder?.release()
+                val durationSec = ((System.currentTimeMillis() - recordStartTime) / 1000).toInt().coerceAtLeast(1)
+                val bytes = file?.takeIf { it.exists() && it.length() > 0L }?.readBytes()
+                file?.delete()
+                if (bytes != null) {
+                    val fileName = "group_voice_${System.currentTimeMillis()}.m4a"
+                    viewModel.uploadFileToSupabase(
+                        bucket = "voice_notes",
+                        fileName = fileName,
+                        fileBytes = bytes,
+                        contentType = "audio/m4a",
+                        onSuccess = { publicUrl ->
+                            viewModel.sendGroupMessage(group.id, "", voiceUrl = publicUrl, voiceDurationSec = durationSec)
+                        },
+                        onFailure = { err ->
+                            Toast.makeText(context, "Voice upload failed: $err", Toast.LENGTH_LONG).show()
+                        }
+                    )
+                }
+            } catch (e: Exception) {
+                runCatching { recorder?.release() }
+                file?.delete()
+                Log.e("GROUP_VOICE_REC", "Failed to stop recording", e)
+            }
+        }
+    }
+
+    val cancelRecording = {
+        val recorder = mediaRecorder
+        val file = voiceFile
+        mediaRecorder = null
+        voiceFile = null
+        isRecording = false
+        viewModel.setGroupVoiceRecordingState(group.id, false)
+        runCatching { recorder?.stop() }
+        runCatching { recorder?.release() }
+        file?.delete()
+    }
+
+    // Keep gesture callbacks fresh without restarting pointer input when recording state changes.
+    // Restarting the detector during onLongPress can cancel the active gesture and leave the
+    // group recorder in an inconsistent state.
+    val latestIsRecording = rememberUpdatedState(isRecording)
+    val latestAudioPermissionGranted = rememberUpdatedState(audioPermissionGranted)
+    val latestStartRecording = rememberUpdatedState(startRecording)
+    val latestStopAndSendVoice = rememberUpdatedState(stopAndSendVoice)
+    val latestCancelRecording = rememberUpdatedState(cancelRecording)
+
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    val bgStart = MaterialTheme.colorScheme.background
+    val bgEnd = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+    val chatGradientBg = Brush.verticalGradient(
+        colors = listOf(bgStart, bgEnd)
+    )
+
+    val barColors = chatBarColors(groupThemeSpec, false)
+    KeyboardResizeMode()
+    Box(Modifier.fillMaxSize()) {
+    ChatBackdrop(groupThemeSpec, null, chatGradientBg, chatAppearance.backgroundDim)
+    Scaffold(
+        containerColor = Color.Transparent,
+        contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(18.dp))
+                            .clickable { showMembers = true }
+                            .padding(vertical = 2.dp, horizontal = 4.dp)
+                    ) {
+                        if (group.profileUrl.isNotBlank()) {
+                            AsyncImage(
+                                model = group.profileUrl,
+                                contentDescription = group.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .border(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), CircleShape)
+                            )
+                        } else {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Group, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.width(8.dp))
+
+                        Column {
+                            Text(
+                                text = group.name,
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = barColors?.content ?: MaterialTheme.colorScheme.onSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = "${group.members.size} Members",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = barColors?.content?.copy(alpha = .75f) ?: MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
+                            )
+                        }
+                    }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack, modifier = Modifier.testTag("group_chat_back_button")) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = MaterialTheme.colorScheme.primary)
+                    }
+                },
+                actions = {
+                    // Two compact call buttons + one menu, so the group name always has room.
+                    ChatCallPill(onVideo = { onGroupCall(true) }, onAudio = { onGroupCall(false) })
+                    Box {
+                        IconButton(onClick = { showGroupMenu = true }, modifier = Modifier.size(40.dp)) {
+                            Icon(Icons.Default.MoreVert, contentDescription = "Group menu", tint = barColors?.content ?: MaterialTheme.colorScheme.onSurface)
+                        }
+                        DropdownMenu(expanded = showGroupMenu, onDismissRequest = { showGroupMenu = false }) {
+                            DropdownMenuItem(text = { Text(tr("Group profile & smart tools")) }, leadingIcon = { Icon(Icons.Default.AutoAwesome, null) }, onClick = { showGroupMenu = false; showSmartTools = true })
+                            DropdownMenuItem(text = { Text(tr("Search messages")) }, leadingIcon = { Icon(Icons.Default.Search, null) }, onClick = { showGroupMenu = false; showMessageSearch = !showMessageSearch })
+                            DropdownMenuItem(text = { Text(tr("Add members")) }, leadingIcon = { Icon(Icons.Default.PersonAdd, null) }, onClick = { showGroupMenu = false; showAddMembers = true })
+                            DropdownMenuItem(text = { Text(tr("Members")) }, leadingIcon = { Icon(Icons.Default.Group, null) }, onClick = { showGroupMenu = false; showMembers = true })
+                        }
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = barColors?.container ?: MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
+                ),
+                modifier = Modifier.border(0.dp, Color.Transparent) // clean glass look
+            )
+        },
+        modifier = Modifier.fillMaxSize()
+    ) { innerPadding ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            GroupLiveCallBar(
+                visible = !joinRoomId.isNullOrBlank() || insideThisCall,
+                groupName = group.name,
+                hostName = liveGroupCall?.hostName.orEmpty(),
+                video = if (insideThisCall) myGroupCall.video else joinVideo,
+                people = if (insideThisCall) myGroupCall.participants.size else (liveGroupCall?.participantCount ?: 0),
+                startedAt = liveGroupCall?.startedAt ?: 0L,
+                inside = insideThisCall,
+                dismissible = liveGroupCall == null && !insideThisCall,
+                onJoin = { (if (insideThisCall) myGroupCall.roomId else joinRoomId)?.let { onJoinPendingCall(it, joinVideo) } },
+                onDismiss = onDismissPendingCall
+            )
+            GroupPinnedBar(group = group, canEdit = group.createdBy == currentUserId || currentUserId in group.admins, onUnpin = { viewModel.updateGroupSmart(group.id, mapOf("pinnedMessage" to "", "pinnedBy" to "")) })
+
+            AnimatedVisibility(
+                visible = otherVoiceRecorders.isNotEmpty(),
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                val names = otherVoiceRecorders.mapNotNull { uid -> allUsers.firstOrNull { it.uid == uid }?.name?.takeIf { it.isNotBlank() } }
+                Surface(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
+                    shape = RoundedCornerShape(18.dp),
+                    color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = .92f)
+                ) {
+                    Row(Modifier.padding(horizontal = 14.dp, vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Mic, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(19.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (names.isNotEmpty()) "${names.take(2).joinToString(" and ")} ${if (names.size > 2) "and others " else ""}is recording a voice note…" else "Someone is recording a voice note…",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 12.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            AnimatedVisibility(
+                visible = showMessageSearch,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                    tonalElevation = 4.dp,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = messageSearchQuery,
+                            onValueChange = { messageSearchQuery = it },
+                            singleLine = true,
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                            trailingIcon = {
+                                if (messageSearchQuery.isNotBlank()) {
+                                    IconButton(onClick = { messageSearchQuery = "" }) {
+                                        Icon(Icons.Default.Clear, contentDescription = "Clear search")
+                                    }
+                                }
+                            },
+                            placeholder = { Text(tr("Search group messages")) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(22.dp)
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (messageSearchQuery.isBlank()) "All" else visibleGroupMessages.size.toString(),
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
+            // Messages list area
+            if (messages.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            Icons.Default.Group,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.4f),
+                            modifier = Modifier.size(64.dp)
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "Welcome to ${group.name}",
+                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "Send a message or a voice note to get started!",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            } else if (visibleGroupMessages.isEmpty()) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.SearchOff, contentDescription = null, tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f), modifier = Modifier.size(48.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text(tr("No matching group messages"), style = MaterialTheme.typography.titleMedium)
+                        Text(tr("Try another keyword"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .padding(horizontal = chatAppearance.sidePadding.dp),
+                    contentPadding = PaddingValues(vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(chatAppearance.messageSpacing.dp, Alignment.Bottom),
+                    reverseLayout = true
+                ) {
+                    items(visibleGroupMessages.reversed(), key = { it.messageId }) { msg ->
+                        val entranceAnimate = remember(msg.messageId) { msg.timestamp > chatOpenedAt - 1500L && enteredMessageIds.add(msg.messageId) }
+                        Box(Modifier.fillMaxWidth().animateItem(fadeInSpec = null, fadeOutSpec = null, placementSpec = androidx.compose.animation.core.spring(dampingRatio = .85f, stiffness = 320f)).messageEntrance(chatAppearance.messageAnimation, entranceAnimate, msg.senderId == currentUserId)) {
+                        if (msg.senderId == "system") {
+                            // System Log message
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 6.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f),
+                                    shape = RoundedCornerShape(18.dp)
+                                ) {
+                                    Text(
+                                        text = msg.text,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
+                        } else if (GroupPolls.parse(msg.text) != null) {
+                            GroupPollCard(GroupPolls.parse(msg.text)!!, msg, group, currentUserId) { option -> viewModel.voteGroupPoll(group.id, msg.messageId, option) }
+                        } else {
+                            val isSentByMe = msg.senderId == currentUserId
+                            GroupMessageBubbleItem(
+                                msg = msg,
+                                isSentByMe = isSentByMe,
+                                textScale = chatTextScale,
+                                onMentionClick = openMention,
+                                appearance = chatAppearance,
+                                themeSpec = groupThemeSpec,
+                                onDeleteSelect = {
+                                    viewModel.deleteGroupMessage(group.id, msg.messageId)
+                                },
+                                onReplySelect = { target ->
+                                    replyingToGroupMessage = target
+                                },
+                                onTranslate = { target ->
+                                    translationMessage = target
+                                    translationText = ""
+                                    translationLoading = true
+                                    viewModel.askAssistant(
+                                        "Translate the following group chat message into natural Bengali. Return only the Bengali translation, preserving names, numbers, links, and formatting:\n\n${target.text}",
+                                        emptyList()
+                                    ) { result ->
+                                        translationText = result
+                                        translationLoading = false
+                                    }
+                                }
+                            )
+                        }
+                        }
+                    }
+                }
+            }
+
+            // Input fields bar
+            Surface(
+                color = Color.Transparent,
+                tonalElevation = 8.dp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // The composer rides exactly on top of the keyboard (or the navigation bar when
+                    // the keyboard is closed). The screen is in resize mode, so this is the only
+                    // keyboard offset that applies — no double jump, and never hidden.
+                    .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom).union(WindowInsets.ime))
+                    .glassmorphic(
+                        isDark = isDark,
+                        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+                    )
+            ) {
+                // Reply preview and composer are stacked in ONE column. They used to be siblings
+                // inside the Surface (a Box), so the reply bar was drawn on top of / under the
+                // text box instead of above it.
+                Column {
+                AnimatedVisibility(
+                    visible = replyingToGroupMessage != null,
+                    enter = expandVertically() + fadeIn(),
+                    exit = shrinkVertically() + fadeOut()
+                ) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.85f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = "Replying to ${replyingToGroupMessage?.senderName.orEmpty()}",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = replyingToGroupMessage?.text?.ifBlank { "Attachment or voice note" }.orEmpty().take(80),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            IconButton(onClick = { replyingToGroupMessage = null }) {
+                                Icon(Icons.Default.Close, contentDescription = "Cancel reply")
+                            }
+                        }
+                    }
+                }
+
+                val mentionQuery = remember(messageText) { Mentions.activeQuery(messageText) }
+                val mentionSuggestions = remember(mentionQuery, groupMemberUsers) {
+                    mentionQuery?.let { Mentions.suggestions(it, groupMemberUsers, currentUserId) }.orEmpty()
+                }
+                MentionSuggestionBar(mentionSuggestions, onPick = { user -> messageText = Mentions.complete(messageText, user) })
+                val hasText = messageText.isNotBlank()
+                if (hasText && AppFeatureFlags.aiEnabled.collectAsState().value) AiWritingToolsRow(messageText, viewModel) { messageText = it }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 8.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    AnimatedVisibility(visible = !isRecording) {
+                        IconButton(onClick = { photoPickerLauncher.launch("image/*") }) {
+                            Icon(Icons.Default.AddPhotoAlternate, contentDescription = "Attach image", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(26.dp))
+                        }
+                    }
+                    AnimatedVisibility(visible = !hasText || isRecording) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            HoldToRecordButton(
+                                isRecording = isRecording,
+                                permissionGranted = audioPermissionGranted,
+                                onRequestPermission = { permissionLauncher.launch(Manifest.permission.RECORD_AUDIO) },
+                                onStart = { if (!latestIsRecording.value) latestStartRecording.value() },
+                                onSend = { if (latestIsRecording.value) latestStopAndSendVoice.value() },
+                                onCancel = { if (latestIsRecording.value) latestCancelRecording.value() },
+                                onHint = { Toast.makeText(context, "Hold to record • slide up to send, down to cancel", Toast.LENGTH_SHORT).show() },
+                                onDragChange = { _, armed -> voiceCancelArmed = armed }
+                            )
+                            Spacer(Modifier.width(6.dp))
+                        }
+                    }
+
+                    if (isRecording) {
+                        VoiceRecordingPill(startedAtMillis = recordStartTime, cancelArmed = voiceCancelArmed, modifier = Modifier.weight(1f))
+                    } else {
+                        OutlinedTextField(
+                            value = messageText,
+                            onValueChange = { messageText = it },
+                            placeholder = { Text(tr("Message the group"), color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)) },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("group_message_input"),
+                            shape = RoundedCornerShape(26.dp),
+                            maxLines = 5,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f),
+                                focusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.42f)
+                            )
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        if (hasText) {
+                            IconButton(
+                                onClick = {
+                                    val meIsGroupAdmin = group.createdBy == currentUserId || currentUserId in group.admins
+                                    val lastMine = messages.lastOrNull { it.senderId == currentUserId }?.timestamp ?: 0L
+                                    val waitSec = if (group.slowModeSeconds > 0 && !meIsGroupAdmin) group.slowModeSeconds - ((System.currentTimeMillis() - lastMine) / 1000L) else 0L
+                                    if (group.onlyAdminsCanPost && !meIsGroupAdmin) {
+                                        Toast.makeText(context, "Only admins can send messages in this group", Toast.LENGTH_SHORT).show()
+                                    } else if (waitSec > 0) {
+                                        Toast.makeText(context, "Slow mode: wait ${waitSec}s", Toast.LENGTH_SHORT).show()
+                                    } else if (messageText.isNotBlank()) {
+                                        viewModel.sendGroupMessage(
+                                            groupId = group.id,
+                                            text = messageText,
+                                            replyTo = replyingToGroupMessage
+                                        )
+                                        replyingToGroupMessage = null
+                                        messageText = ""
+                                    }
+                                },
+                                modifier = Modifier
+                                    .size(46.dp)
+                                    .background(MaterialTheme.colorScheme.primary, CircleShape)
+                            ) {
+                                Icon(Icons.Default.Send, contentDescription = "Send", tint = MaterialTheme.colorScheme.onPrimary)
+                            }
+                        } else {
+                            val reactionScale = remember { androidx.compose.animation.core.Animatable(1f) }
+                            Box(
+                                Modifier
+                                    .size(46.dp)
+                                    .graphicsLayer { scaleX = reactionScale.value; scaleY = reactionScale.value }
+                                    .quickReactionGlow(MaterialTheme.colorScheme.primary)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        viewModel.playLikeSound()
+                                        if (chatAppearance.animateReactions && !ConvoStickers.isSticker(quickReaction)) ReactionFx.fire(quickReaction)
+                                        viewModel.sendGroupMessage(groupId = group.id, text = quickReaction, replyTo = replyingToGroupMessage)
+                                        replyingToGroupMessage = null
+                                        groupUiScope.launch {
+                                            reactionScale.animateTo(1.35f, androidx.compose.animation.core.tween(110))
+                                            reactionScale.animateTo(1f, androidx.compose.animation.core.spring(dampingRatio = .4f))
+                                        }
+                                    }
+                                    .testTag("group_quick_reaction_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (ConvoStickers.isSticker(quickReaction)) ConvoStickerView(quickReaction, 40.dp, animate = chatAppearance.animateReactions)
+                                else if (chatAppearance.animateReactions) WobbleEmoji(quickReaction) else Text(quickReaction, fontSize = 27.sp)
+                            }
+                        }
+                    }
+                }
+                }
+            }
+        }
+    }
+    ReactionFxOverlay()
+    }
+
+    if (showSmartTools) {
+        GroupSmartToolsDialog(
+            group = group, messages = messages, users = allUsers, currentUser = viewModel.currentUserState.collectAsState().value,
+            viewModel = viewModel,
+            onMentionEveryone = { messageText = (messageText.trimEnd() + " @everyone ").trimStart() },
+            onDismiss = { showSmartTools = false },
+            onLeft = onBack
+        )
+    }
+
+    if (showMembers) {
+        ModalBottomSheet(
+            onDismissRequest = { showMembers = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("${group.name} members", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.ExtraBold)
+                Text("${group.members.size} people in this group", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 520.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(bottom = 18.dp)
+                ) {
+                    items(group.members, key = { it }) { memberId ->
+                        val member = allUsers.firstOrNull { it.uid == memberId }
+                        Surface(
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (!member?.profileImageUrl.isNullOrBlank()) {
+                                    AsyncImage(
+                                        model = member?.profileImageUrl,
+                                        contentDescription = member?.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.size(42.dp).clip(CircleShape)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier.size(42.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Text((member?.name ?: memberId).take(1).uppercase(), fontWeight = FontWeight.Bold)
+                                    }
+                                }
+                                Spacer(Modifier.width(12.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(member?.name?.ifBlank { memberId.take(10) } ?: memberId.take(10), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(if (member?.isOnline == true) "Online now" else "Member", style = MaterialTheme.typography.bodySmall, color = if (member?.isOnline == true) Color(0xFF1B8A4B) else MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (memberId == currentUserId) Text(tr("You"), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddMembers) {
+        val selectable = allUsers.filterNot { group.members.contains(it.uid) }
+        val selected = remember { mutableStateListOf<String>() }
+        AlertDialog(
+            onDismissRequest = { showAddMembers = false },
+            title = { Text(tr("Add group members"), fontWeight = FontWeight.Bold) },
+            text = {
+                if (selectable.isEmpty()) {
+                    Text(tr("Everyone is already in this group."))
+                } else {
+                    LazyColumn(Modifier.heightIn(max = 380.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        items(selectable, key = { it.uid }) { user ->
+                            val checked = selected.contains(user.uid)
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                                    .clickable { if (checked) selected.remove(user.uid) else selected.add(user.uid) }
+                                    .background(if (checked) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(checked, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text(user.name)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.addGroupMembers(group, selected.toList()) { ok ->
+                            Toast.makeText(context, if (ok) "Members added" else "Could not add members", Toast.LENGTH_SHORT).show()
+                        }
+                        showAddMembers = false
+                    },
+                    enabled = selected.isNotEmpty()
+                ) { Text(tr("Add")) }
+            },
+            dismissButton = { TextButton(onClick = { showAddMembers = false }) { Text(tr("Cancel")) } }
+        )
+    }
+
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+fun GroupMessageBubbleItem(
+    msg: GroupMessage,
+    isSentByMe: Boolean,
+    onDeleteSelect: () -> Unit,
+    onReplySelect: (GroupMessage) -> Unit = {},
+    onTranslate: (GroupMessage) -> Unit = {},
+    textScale: Float = 1f,
+    onMentionClick: (String) -> Unit = {},
+    appearance: ChatAppearance = ChatAppearance(),
+    themeSpec: ChatThemeSpec? = null
+) {
+    var showMenu by remember { mutableStateOf(false) }
+    var dragOffset by remember(msg.messageId) { mutableFloatStateOf(0f) }
+    val context = LocalContext.current
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
+    
+    val bubbleStyle = appearance.resolvedStyle(themeSpec)
+    val palette = rememberBubblePalette(isSentByMe, themeSpec, themeSpec?.accent, bubbleStyle)
+    val bubbleShape = chatBubbleShape(appearance, isSentByMe)
+    val alignment = if (isSentByMe) Alignment.CenterEnd else Alignment.CenterStart
+    val textColor = palette.text
+    val maxBubbleWidth = (androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp * appearance.maxWidthFraction).dp
+    val isStickerOnly = ConvoStickers.isSticker(msg.text) && msg.imageUrl.isNullOrBlank() && msg.voiceUrl.isNullOrBlank()
+    val timeString = remember(msg.timestamp, appearance.use24h) {
+        runCatching {
+            SimpleDateFormat(if (appearance.use24h) "HH:mm" else "hh:mm a", Locale.getDefault()).apply {
+                timeZone = TimeZone.getTimeZone("Asia/Dhaka")
+            }.format(Date(msg.timestamp))
+        }.getOrDefault("")
+    }
+
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = alignment
+    ) {
+        Column(
+            modifier = Modifier.widthIn(max = maxBubbleWidth),
+            horizontalAlignment = if (isSentByMe) Alignment.End else Alignment.Start
+        ) {
+            // Sender display name (small)
+            if (!isSentByMe) {
+                Text(
+                    text = msg.senderName,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (themeSpec?.isScene == true && !themeSpec.light) palette.accent else MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(start = 6.dp, bottom = 2.dp)
+                )
+            }
+
+            if (isStickerOnly) {
+                ConvoStickerView(
+                    msg.text, 88.dp, animate = appearance.animateReactions,
+                    modifier = Modifier.combinedClickable(onClick = { showMenu = true }, onLongClick = { showMenu = true })
+                )
+                Text(timeString, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = .75f), modifier = Modifier.padding(horizontal = 6.dp))
+            } else
+            Surface(
+                color = Color.Transparent,
+                shape = bubbleShape,
+                modifier = Modifier
+                    .chatBubble(bubbleStyle, bubbleShape, palette, appearance)
+                    .offset { IntOffset(dragOffset.roundToInt(), 0) }
+                    .pointerInput(msg.messageId) {
+                        detectHorizontalDragGestures(
+                            onHorizontalDrag = { _, amount ->
+                                dragOffset = (dragOffset + amount).coerceIn(-140f, 140f)
+                            },
+                            onDragEnd = {
+                                if (abs(dragOffset) > 72f) onReplySelect(msg)
+                                dragOffset = 0f
+                            },
+                            onDragCancel = { dragOffset = 0f }
+                        )
+                    }
+                    .combinedClickable(
+                        onClick = { showMenu = true },
+                        onLongClick = { showMenu = true },
+                        onDoubleClick = {
+                            if (msg.text.isNotBlank()) {
+                                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Convo Chat message", msg.text))
+                                Toast.makeText(context, "Message copied", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    )
+            ) {
+                Column(modifier = Modifier.padding(horizontal = appearance.innerPadding.dp, vertical = (appearance.innerPadding * .62f).dp)) {
+                    if (!msg.replyToId.isNullOrBlank()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 5.dp)
+                        ) {
+                            Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+                                Text(
+                                    text = msg.replyToSenderName.orEmpty().ifBlank { "Message" },
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = msg.replyToText.orEmpty().ifBlank { "Attachment or voice note" }.take(80),
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    fontSize = 11.sp
+                                )
+                            }
+                        }
+                    }
+
+                    if (!msg.imageUrl.isNullOrBlank()) {
+                        var showGroupImage by remember { mutableStateOf(false) }
+                        if (showGroupImage) FullScreenChatImage(msg.imageUrl, onDismiss = { showGroupImage = false })
+                        AdaptiveChatImage(url = msg.imageUrl, onClick = { showGroupImage = true }, corner = 14.dp)
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+
+                    if (!msg.voiceUrl.isNullOrBlank()) {
+                        VoicePlayerBubble(voiceUrl = msg.voiceUrl, durationSec = msg.voiceDurationSec ?: 0, accent = if (isSentByMe) palette.text else palette.accent, contentColor = palette.text)
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+
+                    if (msg.text.isNotBlank()) {
+                        if (isEmojiOnlyMessage(msg.text)) {
+                            Text(msg.text, fontSize = (34 * textScale).sp, lineHeight = (40 * textScale).sp)
+                        } else {
+                            RichMessageText(
+                                text = msg.text,
+                                color = textColor,
+                                onMentionClick = onMentionClick,
+                                style = MaterialTheme.typography.bodyMedium.copy(fontSize = (14 * textScale).sp, lineHeight = (20 * textScale).sp),
+                                mentionColor = if (isSentByMe) textColor else palette.accent,
+                                onPlainClick = { showMenu = true },
+                                onLongPress = { showMenu = true }
+                            )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.End,
+                        modifier = Modifier.align(Alignment.End)
+                    ) {
+                        Text(
+                            text = timeString,
+                            fontSize = 9.sp,
+                            color = palette.meta
+                        )
+                    }
+                }
+            }
+
+            // Dropdown Menu for deletion
+            DropdownMenu(
+                expanded = showMenu,
+                onDismissRequest = { showMenu = false },
+                modifier = Modifier.background(MaterialTheme.colorScheme.surface)
+            ) {
+                if (msg.text.isNotBlank() && AppFeatureFlags.aiEnabled.collectAsState().value) {
+                    DropdownMenuItem(
+                        text = { Text(tr("Translate to Bengali (AI)")) },
+                        leadingIcon = { Icon(Icons.Default.Translate, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                        onClick = {
+                            showMenu = false
+                            onTranslate(msg)
+                        }
+                    )
+                }
+                DropdownMenuItem(
+                    text = { Text(tr("Delete Message"), color = MaterialTheme.colorScheme.error) },
+                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                    onClick = {
+                        onDeleteSelect()
+                        showMenu = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun GroupAudioPlayerItem(voiceUrl: String, durationSec: Int) {
+    val context = LocalContext.current
+    var isPlaying by remember { mutableStateOf(false) }
+    var mediaPlayer by remember { mutableStateOf<MediaPlayer?>(null) }
+
+    DisposableEffect(voiceUrl) {
+        onDispose {
+            mediaPlayer?.release()
+        }
+    }
+
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 10.dp, vertical = 6.dp)
+    ) {
+        IconButton(
+            onClick = {
+                if (isPlaying) {
+                    mediaPlayer?.stop()
+                    mediaPlayer?.release()
+                    mediaPlayer = null
+                    isPlaying = false
+                } else {
+                    try {
+                        val mp = MediaPlayer().apply {
+                            setDataSource(context, Uri.parse(voiceUrl))
+                            prepare()
+                            start()
+                            setOnCompletionListener {
+                                isPlaying = false
+                                release()
+                                mediaPlayer = null
+                            }
+                        }
+                        mediaPlayer = mp
+                        isPlaying = true
+                    } catch (e: Exception) {
+                        Toast.makeText(context, "Error playing audio: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            modifier = Modifier.size(32.dp)
+        ) {
+            Icon(
+                imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                contentDescription = if (isPlaying) "Pause" else "Play",
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+
+        Spacer(modifier = Modifier.width(8.dp))
+
+        Column {
+            Text(
+                text = "Voice message",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Text(
+                text = "${durationSec}s",
+                fontSize = 10.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+            )
+        }
+    }
+}
+
+
+@Composable
+private fun GroupLinkPreviewCard(url: String, isSentByMe: Boolean) {
+    LinkPreviewCard(
+        url = url,
+        color = if (isSentByMe) Color.White else MaterialTheme.colorScheme.onSurface
+    )
+}
+

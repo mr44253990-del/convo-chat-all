@@ -1,0 +1,226 @@
+package com.example.data
+
+data class User(
+    val uid: String = "",
+    val name: String = "",
+    val dob: String = "",
+    val username: String = "",
+    val fcmToken: String = "",
+    val profileImageUrl: String = "",
+    val isOnline: Boolean = false,
+    val lastActive: Long = 0L,
+    val onlineUntil: Long = 0L,
+    val offlineSince: Long = 0L,
+    val blockedUsers: List<String> = emptyList(),
+    val createdAt: Long = 0L,
+    val friends: List<String> = emptyList(),
+    val bio: String = "",
+    val coverImageUrl: String = "",
+    val followers: List<String> = emptyList(),
+    val following: List<String> = emptyList(),
+    /** Additive server-backed net follower growth counter. */
+    val followerGrowth: Long = 0L,
+    val role: String = "user",
+    val isPremium: Boolean = false,
+    val premiumPlan: String = "",
+    val premiumUntil: Long = 0L,
+    val premiumApprovedAt: Long = 0L,
+    val premiumTrialClaimed: Boolean = false,
+    val premiumSource: String = "",
+    val coverScale: Float = 1f,
+    val coverOffsetY: Float = 0f,
+    val profileHidden: Boolean = false,
+    val awayReplyEnabled: Boolean = false,
+    val awayReplyText: String = "",
+    val awayReplyUntil: Long = 0L,
+    val activeProfileType: String = "Personal",
+    val profileVisibility: String = "everyone",
+    val pronouns: String = "",
+    val professionalTitle: String = "",
+    val publicContactEmail: String = "",
+    val socialLinks: Map<String, String> = emptyMap(),
+    /** "sub_admin" when the admin delegated access; only the admin can change these three. */
+    val staffRole: String = "",
+    val staffPermissions: List<String> = emptyList(),
+    val staffTitle: String = "",
+    val mfaEnabled: Boolean = false,
+    /** Convo build the user last opened (written by the app on every launch). */
+    val appVersion: String = "",
+    val appVersionCode: Long = 0L,
+    val appVersionAt: Long = 0L,
+    val deviceModel: String = "",
+    val androidVersion: String = "",
+    /** One-way hash of the verified phone number (E.164 digits), used only for contact discovery. */
+    val phoneHash: String = ""
+)
+
+data class MessageEditRecord(
+    val text: String = "",
+    val editedAt: Long = 0L,
+    val editedBy: String = ""
+)
+
+data class Message(
+    val messageId: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val senderUsername: String = "",
+    val text: String = "",
+    val timestamp: Long = 0L,
+    val edited: Boolean = false,
+    val replyToId: String? = null,
+    val replyToText: String? = null,
+    val replyToSenderName: String? = null,
+    val imageUrl: String? = null,
+    val voiceUrl: String? = null,
+    val voiceDurationSec: Int? = null,
+    val remoteVoiceUrl: String? = null,
+    val fileUrl: String? = null,
+    val remoteFileUrl: String? = null,
+    val fileName: String? = null,
+    val fileMimeType: String? = null,
+    val fileSize: Long? = null,
+    val seenByRecipient: Boolean = false,
+    val deliveredToRecipient: Boolean = false,
+    /** Epoch millis after which the message should be hidden/removed; 0 means persistent. */
+    val expiresAt: Long = 0L,
+    val editHistory: List<MessageEditRecord> = emptyList(),
+    val reactions: Map<String, String> = emptyMap(),
+    /** True when the body lives in the admin-enabled Cloudflare D1 store (RTDB carries text = ""). */
+    val cloudText: Boolean = false
+)
+
+data class Story(
+    val id: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val senderProfilePic: String = "",
+    val imageUrl: String = "",
+    val videoUrl: String = "",
+    val text: String = "",
+    val timestamp: Long = 0L,
+    val reactions: Map<String, String> = emptyMap(), // userId to reaction symbol (like, love, etc)
+    val comments: List<StoryComment> = emptyList(),
+    val viewers: List<String> = emptyList(),
+    val viewCounts: Map<String, Int> = emptyMap(),
+    val spotlightUntil: Long = 0L,
+    /** Music from the audio library that plays while the story is open. */
+    val audioUrl: String = "",
+    val audioTitle: String = "",
+    val audioArtist: String = ""
+)
+
+data class StoryComment(
+    val commentId: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val text: String = "",
+    val timestamp: Long = 0L
+)
+
+data class Post(
+    val id: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val senderProfilePic: String = "",
+    val text: String = "",
+    val imageUrl: String = "",
+    val audioUrl: String = "",
+    val videoUrl: String = "",
+    val timestamp: Long = 0L,
+    val reactions: Map<String, String> = emptyMap(), // userId -> reaction type
+    val comments: List<PostComment> = emptyList(),
+    val viewsCount: Int = 0,
+    val isPrivate: Boolean = false,
+    val title: String = "",
+    val tags: List<String> = emptyList(),
+    val taggedUserIds: List<String> = emptyList(),
+    val feeling: String = "",
+    val backgroundStyle: String = "glass",
+    val textAnimation: String = "none",
+    val r2ObjectKeys: List<String> = emptyList(),
+    val isReel: Boolean = false,
+    val expiresAt: Long = 0L,
+    val imageUrls: List<String> = emptyList(),
+    val mediaReactions: Map<String, Map<String, String>> = emptyMap(),
+    /** Original admin-imported URL when the provider does not expose a direct media URL. */
+    val sourceUrl: String = "",
+    /** Sanitized provider embed markup; displayed only inside an isolated WebView. */
+    val embedHtml: String = "",
+    val providerName: String = "",
+    val thumbnailUrl: String = "",
+    val isAdminReel: Boolean = false,
+    /** Admin library imports stay in Reels unless explicitly published everywhere. */
+    val postEverywhere: Boolean = true,
+    /** Created by the Auto AI post scheduler (Supabase edge function). */
+    val autoGenerated: Boolean = false,
+    val autoPostType: String = "",
+    /** Track details when [audioUrl] comes from the audio library. */
+    val audioTitle: String = "",
+    val audioArtist: String = "",
+    val audioArtwork: String = "",
+    val audioSource: String = ""
+)
+
+data class PostComment(
+    val commentId: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val text: String = "",
+    val timestamp: Long = 0L,
+    val reactions: Map<String, String> = emptyMap(),
+    val replyToId: String = "",
+    val replyToName: String = ""
+)
+
+data class Group(
+    val id: String = "",
+    val name: String = "",
+    val profileUrl: String = "",
+    val members: List<String> = emptyList(),
+    val createdAt: Long = 0L,
+    val lastMessage: String = "",
+    val createdBy: String = "",
+    /** Live group call pointer: every member sees a "Join" bar while this room is active. */
+    val activeCallRoomId: String = "",
+    val activeCallHostId: String = "",
+    val activeCallHostName: String = "",
+    val activeCallVideo: Boolean = false,
+    val activeCallStartedAt: Long = 0L,
+    /** Smart group tools (v5.0). */
+    val pinnedMessage: String = "",
+    val pinnedBy: String = "",
+    val description: String = "",
+    val admins: List<String> = emptyList(),
+    val onlyAdminsCanPost: Boolean = false,
+    val slowModeSeconds: Int = 0,
+    /** Poll votes: messageId → (uid → chosen option index). */
+    val pollVotes: Map<String, Map<String, Long>> = emptyMap()
+)
+
+/** What the group chat needs to draw the live "Join call" bar. */
+data class ActiveGroupCallInfo(
+    val roomId: String = "",
+    val hostId: String = "",
+    val hostName: String = "",
+    val video: Boolean = false,
+    val startedAt: Long = 0L,
+    val participantCount: Int = 0
+)
+
+data class GroupMessage(
+    val messageId: String = "",
+    val groupId: String = "",
+    val senderId: String = "",
+    val senderName: String = "",
+    val text: String = "",
+    val timestamp: Long = 0L,
+    val imageUrl: String? = null,
+    val voiceUrl: String? = null,
+    val voiceDurationSec: Int? = null,
+    val replyToId: String? = null,
+    val replyToText: String? = null,
+    val replyToSenderName: String? = null,
+    /** Epoch millis after which the group message should be hidden/removed; 0 means persistent. */
+    val expiresAt: Long = 0L
+)
