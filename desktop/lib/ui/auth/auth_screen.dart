@@ -134,6 +134,7 @@ class _AuthScreenState extends State<AuthScreen> {
         ? await auth.signUp(_email.text, _pass.text, _name.text)
         : await auth.signIn(_email.text, _pass.text);
     if (ok) return;
+    if (!mounted) return;
     ScaffoldMessenger.of(context)
         .showSnackBar(const SnackBar(content: Text("Sign-in failed")));
   }
