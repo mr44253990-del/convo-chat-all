@@ -1,0 +1,28 @@
+name: convo_chat
+description: "Convo Chat desktop — Windows & Linux port of the Convo Chat Android app."
+publish_to: "none"
+version: 6.1.1+75
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^1.2.2
+  shared_preferences: ^2.3.2
+  window_manager: ^0.4.3
+  file_picker: ^8.1.2
+  url_launcher: ^6.3.0
+  intl: ^0.20.1
+  crypto: ^3.0.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/
